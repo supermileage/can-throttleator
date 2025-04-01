@@ -3,8 +3,14 @@
 #include "mcp2515_can.h"
 
 // Turn on to enable serial monitor
-#define DEBUG_SERIAL_EN         0 // Turn on
+#define DEBUG_SERIAL_EN         1 // Turn on
 #define SERIAL_MONITOR_SPEED    115200
+
+// Hall Sensor Pin for RPM Measurement
+#define INTERRUPT_A 2 // Connected to PIN_HALL_A
+#define RPM_LIMITER 0 // Enables throttle limiting based on RPM Measurement
+#define MIN_THROTTLE 1000
+#define TIME_INTERVAL 50
 
 // After this time in ms of no throttle CAN messages, throttle set to 0
 #define STALE_TIME              1000
@@ -24,7 +30,7 @@
 #define CAN_DEBUG_RECEIVE       0 // Print to serial monitor every CAN message (turn on)
 
 // Turn on to scale exponentially
-#define SCALE_EXP               0
+#define SCALE_EXP               1
 
 // Rolling Average
 #define DATA_POINTS             20
