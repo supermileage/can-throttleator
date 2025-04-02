@@ -30,6 +30,9 @@
 // Turn on to print received CAN messages to serial monitor
 #define CAN_DEBUG_RECEIVE       0 // Print to serial monitor every CAN message (turn on)
 
+// Turn on to implement a rolling average on throttle input, mitigating spikes and noise
+#define SMOOTH_THROTTLE         1
+
 // Turn on to scale exponentially
 #define SCALE_EXP               1
 

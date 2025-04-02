@@ -19,6 +19,7 @@ uint32_t lastLedFlash = 0;
 bool ledFlash = false;
 
 uint16_t outputSamples[DATA_POINTS] = {0};
+
 int sampleIndex = 0;
 uint32_t rollingSum = 0;
 
