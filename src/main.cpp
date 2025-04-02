@@ -206,12 +206,10 @@ void loop() {
     // If the new output is different than the old output, update the voltage on the DAC
     if(newOutput != currentOutput) {
 
-        // Limits throttle until RPM reaches 1000
+        // Limits throttle until RPM reaches Minimum RPM
         if(RPM_LIMITER){
-            if(rpm < 300){
-                if(newOutput > MIN_THROTTLE){
+            if((rpm < MIN_RPM) && (newOutput > MIN_THROTTLE)){
                     newOutput = MIN_THROTTLE;
-                }
             }
         }
 
