@@ -103,6 +103,10 @@ void setup() {
     pinMode(PIN_LED, OUTPUT);
     digitalWrite(PIN_LED, HIGH);
 
+    // Init and turn off Heartbeat pin
+    pinMode(PIN_HEARTBEAT, OUTPUT);
+    digitalWrite(PIN_HEARTBEAT, LOW);
+
     // Start Serial Monitor
     if(DEBUG_SERIAL_EN) {
         Serial.begin(SERIAL_MONITOR_SPEED);
@@ -209,6 +213,9 @@ void loop() {
         msg.data[0] = 0x1;
         uint8_t error = can.sendMsgBuf(msg.id, CAN_FRAME, msg.dataLength, msg.data);
         DEBUG_SERIAL_LN("HEARTBEAT SEND: " + getCanError(error));
+
+        // Toggle the heartbeat GPIO
+        digitalWrite(PIN_HEARTBEAT, !digitalRead(PIN_HEARTBEAT));
     }
 
     // If LED should be flashing, flash it

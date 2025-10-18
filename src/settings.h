@@ -13,6 +13,7 @@
 
 #define PIN_CAN_CS              10
 #define PIN_LED                 5
+#define PIN_HEARTBEAT           0
 
 #define I2C_ADDR_DAC            0x60
 
