@@ -10,6 +10,10 @@
 // DAC I2C address
 #define I2C_ADDR_DAC            0x62
 
+// Scaling factors
+#define DAC_VALUE_TO_V          819.2
+#define DAC_VALUE_TO_INPUT      16U
+
 // Serial monitor macros
 #if DEBUG_SERIAL_EN
     #define DEBUG_SERIAL_LN(x) Serial.println(x)
