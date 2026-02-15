@@ -23,6 +23,11 @@ uint16_t outputSamples[DATA_POINTS] = {0};
 int sampleIndex = 0;
 uint32_t rollingSum = 0;
 
+// RPM Measurements
+volatile unsigned int count = 0; // Counter for hall sensor triggers
+unsigned long previousMillis = 0; // Time variable for interval calculation
+int rpm; // 0-9000, Rotations Per Minute of the motor
+
 // This struct contains all the components of a CAN message. dataLength must be <= 8, 
 // and the first [dataLength] positions of data[] must contain valid data
 typedef uint8_t CanBuffer[8];
@@ -94,6 +99,11 @@ uint16_t scaleThrottle(uint8_t input) {
     return output;
 }
 
+void countPulse() {
+  // Increment count when hall sensor triggers
+  count++;
+  }
+
 /**
  *  SETUP
  * */
@@ -132,6 +142,9 @@ void setup() {
     uint8_t error = can.begin(CAN_SPEED, CAN_CONTROLLER_SPEED);
     DEBUG_SERIAL_LN("CAN INIT: " + getCanError(error));
     DEBUG_SERIAL_LN();
+
+    // Initialize interrupt for RPM Measurement
+    attachInterrupt(digitalPinToInterrupt(INTERRUPT_A), countPulse, RISING); // Attach interrupt to hall sensor pin
 }
 
 /**
@@ -172,25 +185,52 @@ void loop() {
 
     }
 
+    // RPM Measurement
+    unsigned long currentMillis = millis();
+
+    // Calculate RPM every interval
+    if (currentMillis - previousMillis >= TIME_INTERVAL) {
+        // Calculate RPM (revolutions per minute)
+        rpm = (count*60000 / (float(TIME_INTERVAL))); // 60000 milliseconds in a minute
+        rpm = rpm/3.5;
+        // Print RPM
+        DEBUG_SERIAL("RPM: ");
+        DEBUG_SERIAL_LN(rpm);
+
+        // Send RPM to CAN
+        byte dataBytes[2];
+        dataBytes[0] = (rpm >> 8) & 0xFF; // Most significant byte
+        dataBytes[1] = rpm & 0xFF;        // Least significant byte
+        can.sendMsgBuf(CAN_MOTOR_RPM,0,2,dataBytes);
+
+        // Reset counter and timer
+        count = 0;
+        previousMillis = currentMillis;
+    }
+
     // If the new output is different than the old output, update the voltage on the DAC
     if(newOutput != currentOutput) {
 
-        if (SMOOTH_THROTTLE) {
-            rollingSum -= outputSamples[sampleIndex];
-            rollingSum += newOutput;
-            outputSamples[sampleIndex] = newOutput;
-            sampleIndex = (sampleIndex + 1) % DATA_POINTS;
-
-            // Calculate the rolling average
-            uint16_t rollingAverage = rollingSum / DATA_POINTS;
-	    currentOutput = rollingAverage;
-        } else {
-            currentOutput = newOutput;
+        // Limits throttle until RPM reaches Minimum RPM
+        if(RPM_LIMITER){
+            if((rpm < MIN_RPM) && (newOutput > MIN_THROTTLE)){
+                    newOutput = MIN_THROTTLE;
+            }
         }
 
-        dac.setVoltage(currentOutput, false); 
-        DEBUG_SERIAL_LN("Voltage set to: " + String(currentOutput / DAC_VALUE_TO_V) + "v");
+        rollingSum -= outputSamples[sampleIndex];
+        rollingSum += newOutput;
+        outputSamples[sampleIndex] = newOutput;
+        sampleIndex = (sampleIndex + 1) % DATA_POINTS;
+
+        // Calculate the rolling average
+        uint16_t rollingAverage = rollingSum / DATA_POINTS;
+        
+        currentOutput = rollingAverage;
     }
+
+    dac.setVoltage(currentOutput, false); 
+    //DEBUG_SERIAL_LN("Voltage set to: " + String(currentOutput / DAC_VALUE_TO_V) + "v");
 
     // If the output is not 0 and it's been more than a certain amount of time since the last
     // throttle CAN message, set the output to 0 as a safety measure
