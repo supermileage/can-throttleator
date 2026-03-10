@@ -2,17 +2,70 @@
 #include <Wire.h>
 
 #include "Adafruit_MCP4725.h"
+#include "can_common.h"
 
 #include "settings.h"
 
+mcp2515_can can(PIN_CAN_CS);
 Adafruit_MCP4725 dac;
 
 uint16_t currentOutput = 0;
-static const int kConfirmThreshold = 10;
+static const int kConfirmThreshold = 100;
+
+// This struct contains all the components of a CAN message. dataLength must be <= 8, 
+// and the first [dataLength] positions of data[] must contain valid data
+typedef uint8_t CanBuffer[8];
+struct CanMessage {
+        uint32_t id;
+        uint8_t dataLength;
+        CanBuffer data;
+};
+
+uint32_t lastUpdate = 0;
+float rpm = 0.0f;
+volatile uint32_t pulses = 0;
+
+/**
+ * @brief Converts CAN status message to readable output
+ * 
+ * @param errorCode CAN status message
+ * @return Readable output
+ * */
+String getCanError(uint8_t errorCode){
+    switch(errorCode){
+        case CAN_OK: 
+            return "CAN OK";
+            break;
+        case CAN_FAILINIT:
+            return "CAN FAIL INIT";
+            break;
+        case CAN_FAILTX:
+            return "CAN FAIL TX";
+            break;
+        case CAN_MSGAVAIL:
+            return "CAN MSG AVAIL";
+            break;
+        case CAN_NOMSG:
+            return "CAN NO MSG";
+            break;
+        case CAN_CTRLERROR:
+            return "CAN CTRL ERROR";
+            break;
+        case CAN_GETTXBFTIMEOUT:
+            return "CAN TX BF TIMEOUT";
+            break;
+        case CAN_SENDMSGTIMEOUT:    
+            return "CAN SEND MSG TIMEOUT";
+            break;
+        default:
+            return "CAN FAIL";
+            break;
+    }
+}
 
 static void applyDuty(int duty) {
 
-    currentOutput = (uint16_t)((4095UL * duty) / 100UL);
+    currentOutput = (uint16_t)((4095UL * duty) / 100UL) * 0.67; // cap at 70% cuz stm takes in 3.3 not 5v silly goose
     dac.setVoltage(currentOutput, false);
     DEBUG_SERIAL_LN("Dutycycle set to: " + String(duty) + "%");
     float volts = (float)currentOutput / (float)DAC_VALUE_TO_V;
@@ -32,10 +85,19 @@ static bool parseDuty(const char* buf, uint8_t len, int* outDuty) {
     return len > 0;
 }
 
+// rpm interrupt service routine
+void hall_ISR() {
+    pulses++;
+}
+
 /**
  *  SETUP
  * */
 void setup() {
+    // rpm hall interrupt
+    pinMode(PIN_HALL_IT, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(PIN_HALL_IT), hall_ISR, RISING);
+
     // Start Serial for raw UART input
     Serial.begin(UART_RAW_BAUD);
 
@@ -55,14 +117,66 @@ void setup() {
     DEBUG_SERIAL_LN("Enter desired dutycycle percent (0-100):");
     DEBUG_SERIAL_LN();
 
+    // Start CAN
+    uint8_t error = can.begin(CAN_SPEED, CAN_CONTROLLER_SPEED);
+    DEBUG_SERIAL_LN("CAN INIT: " + getCanError(error));
+    DEBUG_SERIAL_LN();
+
     // Set DAC to 0 and save it in memory
     dac.setVoltage(0, true);
+
 }
 
 /**
  *  LOOP
  * */
 void loop() {
+
+    if ((millis() - lastUpdate) >= 200) {
+        lastUpdate = millis();
+
+        noInterrupts();
+        uint32_t pulses_snapshot = pulses;
+        pulses = 0;
+        interrupts();
+
+        rpm = (pulses_snapshot / (0.2f * 5.0f)) * 60.0f;
+        //Serial.print("rpm: ");
+        //Serial.println(rpm, 1);
+    }
+
+    // Listen for CAN messages
+    if (can.checkReceive() == CAN_MSGAVAIL) {
+        CanMessage message;
+        message.dataLength = 0;
+        can.readMsgBuf(&message.dataLength, message.data); 
+        message.id = can.getCanId();
+
+        // CURRENT SENSING!!!!!!!
+        if (message.id == CAN_ORIONBMS_PACK && message.dataLength >= 4) {
+            int16_t rawCurrent = (int16_t)((message.data[2] << 8) | message.data[3]);
+            float packCurrent = rawCurrent / 10.0f;
+
+            //Serial.print("current: ");
+            //Serial.println(packCurrent, 1);
+        }
+
+        // Debug all received messages to serial monitor
+        if(CAN_DEBUG_RECEIVE) {
+
+            Serial.println("-----------------------------");
+            Serial.print("CAN MESSAGE RECEIVED - ID: 0x");
+            Serial.println(message.id, HEX);
+
+            for (int i = 0; i < message.dataLength; i++) {
+                Serial.print("0x");
+                Serial.print(message.data[i], HEX);
+                Serial.print("\t");
+            }
+            Serial.println();
+        }
+
+    }
 
     static char rxBuf[4];
     static uint8_t rxLen = 0;
