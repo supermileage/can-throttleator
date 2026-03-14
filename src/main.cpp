@@ -10,7 +10,7 @@ mcp2515_can can(PIN_CAN_CS);
 Adafruit_MCP4725 dac;
 
 uint16_t currentOutput = 0;
-static const int kConfirmThreshold = 100;
+static const int kConfirmThreshold = 101;
 
 // This struct contains all the components of a CAN message. dataLength must be <= 8, 
 // and the first [dataLength] positions of data[] must contain valid data
@@ -21,17 +21,13 @@ struct CanMessage {
         CanBuffer data;
 };
 
-uint32_t lastUpdate = 0;
-float rpm = 0.0f;
-volatile uint32_t pulses = 0;
-
 /**
  * @brief Converts CAN status message to readable output
  * 
  * @param errorCode CAN status message
  * @return Readable output
  * */
-String getCanError(uint8_t errorCode){
+String getCanError(uint8_t errorCode) {
     switch(errorCode){
         case CAN_OK: 
             return "CAN OK";
@@ -63,16 +59,6 @@ String getCanError(uint8_t errorCode){
     }
 }
 
-static void applyDuty(int duty) {
-
-    currentOutput = (uint16_t)((4095UL * duty) / 100UL) * 0.67; // cap at 70% cuz stm takes in 3.3 not 5v silly goose
-    dac.setVoltage(currentOutput, false);
-    DEBUG_SERIAL_LN("Dutycycle set to: " + String(duty) + "%");
-    float volts = (float)currentOutput / (float)DAC_VALUE_TO_V;
-    DEBUG_SERIAL_LN("Voltage set to  : " + String(volts, 2) + "v");
-    DEBUG_SERIAL_LN();
-}
-
 static bool parseDuty(const char* buf, uint8_t len, int* outDuty) {
     int duty = 0;
     for (uint8_t i = 0; i < len; i++) {
@@ -85,18 +71,95 @@ static bool parseDuty(const char* buf, uint8_t len, int* outDuty) {
     return len > 0;
 }
 
-// rpm interrupt service routine
-void hall_ISR() {
-    pulses++;
+
+float requestedDutyPct = 0.0f;
+float appliedDutyPct = 0.0f;
+
+float packCurrentRawA = 0.0f;
+float packCurrentFiltA = 0.0f;
+bool packCurrentValid = false;
+uint32_t lastCurrentRxMs = 0;
+
+const float CURRENT_FILTER_ALPHA = 0.15f;
+const float SOFT_CURRENT_LIMIT_A = 40.0f;   // start reducing throttle above this
+const float HARD_CURRENT_LIMIT_A = 60.0f;   // force throttle to 0 above this
+const uint32_t CURRENT_TIMEOUT_MS = 1000;    // if CAN current is stale, shut down
+
+const float OUTPUT_RAMP_UP_PCT_PER_LOOP   = 0.01f;
+
+static uint32_t lastDebugMs = 0;
+
+static void writeDutyToDac(float dutyPct) {
+    static uint16_t lastOutput = 0xFFFF;
+
+    dutyPct = constrain(dutyPct, 0.0f, 100.0f);
+
+    uint16_t newOutput = (uint16_t)((dutyPct / 100.0f) * DAC_MAX_CMD);
+
+    if (newOutput == lastOutput) {
+        return;
+    }
+
+    currentOutput = newOutput;
+    dac.setVoltage(currentOutput, false);
+    lastOutput = newOutput;
 }
+
+static float computeProtectedDuty(float requestedDuty, float rawCurrent, float filtCurrent, bool currentValid, uint32_t lastRxMs) {
+    requestedDuty = constrain(requestedDuty, 0.0f, 100.0f);
+
+    // never received current data, so disable throttle as safety mechanism
+    if (!currentValid) {
+        return 0.0f;
+    }
+
+    // get rid of stale messages
+    if ((millis() - lastRxMs) > CURRENT_TIMEOUT_MS) {
+        return 0.0f;
+    }
+
+    // instantly shut down throttle on hard limit, using raw current
+    if (rawCurrent >= HARD_CURRENT_LIMIT_A) {
+        return 0.0f;
+    }
+
+    // allow full throttle if current under soft limit, using filtered current
+    if (filtCurrent <= SOFT_CURRENT_LIMIT_A) {
+        return requestedDuty;
+    }
+
+    // how to scale the throttle between the hard and soft limits
+    float scale = (HARD_CURRENT_LIMIT_A - filtCurrent) / (HARD_CURRENT_LIMIT_A - SOFT_CURRENT_LIMIT_A);
+
+    scale = constrain(scale, 0.0f, 1.0f);
+
+    return requestedDuty * scale;
+}
+
+static float slewLimitDuty(float targetDuty, float currentDuty) {
+    targetDuty = constrain(targetDuty, 0.0f, 100.0f);
+    currentDuty = constrain(currentDuty, 0.0f, 100.0f);
+
+    // if torque needs to decrease, do it immediately
+    if (targetDuty < currentDuty) {
+        return targetDuty;
+    }
+
+    // otherwise ramp up slowly
+    currentDuty += OUTPUT_RAMP_UP_PCT_PER_LOOP;
+
+    if (currentDuty > targetDuty) {
+        currentDuty = targetDuty;
+    }
+
+    return currentDuty;
+}
+
 
 /**
  *  SETUP
  * */
 void setup() {
-    // rpm hall interrupt
-    pinMode(PIN_HALL_IT, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(PIN_HALL_IT), hall_ISR, RISING);
 
     // Start Serial for raw UART input
     Serial.begin(UART_RAW_BAUD);
@@ -132,19 +195,6 @@ void setup() {
  * */
 void loop() {
 
-    if ((millis() - lastUpdate) >= 200) {
-        lastUpdate = millis();
-
-        noInterrupts();
-        uint32_t pulses_snapshot = pulses;
-        pulses = 0;
-        interrupts();
-
-        rpm = (pulses_snapshot / (0.2f * 5.0f)) * 60.0f;
-        //Serial.print("rpm: ");
-        //Serial.println(rpm, 1);
-    }
-
     // Listen for CAN messages
     if (can.checkReceive() == CAN_MSGAVAIL) {
         CanMessage message;
@@ -155,10 +205,17 @@ void loop() {
         // CURRENT SENSING!!!!!!!
         if (message.id == CAN_ORIONBMS_PACK && message.dataLength >= 4) {
             int16_t rawCurrent = (int16_t)((message.data[2] << 8) | message.data[3]);
-            float packCurrent = rawCurrent / 10.0f;
+            packCurrentRawA = rawCurrent / 10.0f;
 
-            //Serial.print("current: ");
-            //Serial.println(packCurrent, 1);
+            // bootstrap filter with valid value
+            if (!packCurrentValid) {
+                packCurrentFiltA = packCurrentRawA;
+            } else {
+                // EMA filtering
+                packCurrentFiltA += CURRENT_FILTER_ALPHA * (packCurrentRawA - packCurrentFiltA);
+            }
+            packCurrentValid = true;
+            lastCurrentRxMs = millis();
         }
 
         // Debug all received messages to serial monitor
@@ -221,7 +278,8 @@ void loop() {
             } else {
                 pendingHighConfirm = false;
                 pendingHighDuty = -1;
-                applyDuty(duty);
+                requestedDutyPct = duty;
+                DEBUG_SERIAL_LN("Requested dutycycle set to: " + String(requestedDutyPct) + "%");
             }
             rxLen = 0;
         } else {
@@ -235,5 +293,34 @@ void loop() {
                 rxLen = 0;
             }
         }
+    }
+
+    // compute safe throttle
+    float protectedDutyPct = computeProtectedDuty(
+        requestedDutyPct,
+        packCurrentRawA,
+        packCurrentFiltA,
+        packCurrentValid,
+        lastCurrentRxMs
+    );
+
+    // smooth throttle changes
+    appliedDutyPct = slewLimitDuty(protectedDutyPct, appliedDutyPct);
+
+    // send throttle to DAC
+    writeDutyToDac(appliedDutyPct);
+
+    if ((millis() - lastDebugMs) >= 100) {
+        lastDebugMs = millis();
+
+        DEBUG_SERIAL("Requested: ");
+        DEBUG_SERIAL(requestedDutyPct);
+        DEBUG_SERIAL("%, Applied: ");
+        DEBUG_SERIAL(appliedDutyPct);
+        DEBUG_SERIAL("%, Raw: ");
+        DEBUG_SERIAL(packCurrentRawA);
+        DEBUG_SERIAL(" A, Filt: ");
+        DEBUG_SERIAL(packCurrentFiltA);
+        DEBUG_SERIAL_LN(" A");
     }
 }

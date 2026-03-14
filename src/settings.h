@@ -6,11 +6,14 @@
 // Note: debug output shares the same UART used for input bytes.
 #define DEBUG_SERIAL_EN         1
 
+// DAC CONSTRAINTS
+#define DAC_3_3V                2703
+#define DAC_MAX_CMD             2433  // 90 percent
+
 // UART settings for raw byte input (0-255)
 #define UART_RAW_BAUD           115200
 
 #define PIN_CAN_CS              10
-#define PIN_HALL_IT             2
 
 // DAC I2C address
 #define I2C_ADDR_DAC            0x62
