@@ -23,6 +23,16 @@ uint16_t outputSamples[DATA_POINTS] = {0};
 int sampleIndex = 0;
 uint32_t rollingSum = 0;
 
+float requestedDutyPct = 0.0f;
+float appliedDutyPct = 0.0f;
+
+float packCurrentRawA = 0.0f;
+float packCurrentFiltA = 0.0f;
+bool packCurrentValid = false;
+uint32_t lastCurrentRxMs = 0;
+
+static uint32_t lastDebugMs = 0;
+
 // This struct contains all the components of a CAN message. dataLength must be <= 8, 
 // and the first [dataLength] positions of data[] must contain valid data
 typedef uint8_t CanBuffer[8];
@@ -75,23 +85,82 @@ String getCanError(uint8_t errorCode){
  *          This has the effect of applying a simple curve, such that the throttle is not 
  *          very sensitive on initial press.
  * 
- * @param input Throttle value from 0-255
- * @return Voltage value from 0-4095
+ * @param dutyPct Dutycycle percentage from 0-255
+ * @return void
  * */
-uint16_t scaleThrottle(uint8_t input) {
-    uint32_t output = input + 1;
+static void writeDutyToDac(float dutyPct) {
+    static uint16_t lastOutput = 0xFFFF;
 
-    if(SCALE_EXP) {
-        output = (output * output) / DAC_VALUE_TO_INPUT;
-    } else {
-        output = output * 16;
+    dutyPct = constrain(dutyPct, 0.0f, 100.0f);
+
+    uint16_t newOutput = (uint16_t)((dutyPct / 100.0f) * DAC_MAX_CMD);
+
+    if (newOutput == lastOutput) {
+        return;
     }
 
-    if(output) {
-        output--;
+    currentOutput = newOutput;
+    dac.setVoltage(currentOutput, false);
+    lastOutput = newOutput;
+}
+
+static float computeProtectedDuty(float requestedDuty, float rawCurrent, float filtCurrent, bool currentValid, uint32_t lastRxMs) {
+    float driveCurrentRaw  = max(rawCurrent, 0.0f);
+    float driveCurrentFilt = max(filtCurrent, 0.0f);
+
+    requestedDuty = constrain(requestedDuty, 0.0f, 100.0f);
+
+    // never received current data, so disable throttle as safety mechanism
+    if (!currentValid) return 0.0f;
+
+    // get rid of stale messages
+    if ((millis() - lastRxMs) > CURRENT_TIMEOUT_MS) return 0.0f;
+
+    // instantly shut down throttle on hard limit, using raw current
+    if (driveCurrentRaw >= HARD_CURRENT_LIMIT_A) return 0.0f;
+
+    // allow full throttle if current under soft limit, using filtered current
+    if (driveCurrentFilt <= SOFT_CURRENT_LIMIT_A) return requestedDuty;
+
+    // how to scale the throttle between the hard and soft limits
+    float scale = (HARD_CURRENT_LIMIT_A - driveCurrentFilt) / (HARD_CURRENT_LIMIT_A - SOFT_CURRENT_LIMIT_A);
+
+    scale = constrain(scale, 0.0f, 1.0f);
+
+    return requestedDuty * scale;
+}
+
+static float slewLimitDuty(float targetDuty, float currentDuty) {
+    targetDuty = constrain(targetDuty, 0.0f, 100.0f);
+    currentDuty = constrain(currentDuty, 0.0f, 100.0f);
+
+    // if torque needs to decrease, do it immediately
+    if (targetDuty < currentDuty) {
+        return targetDuty;
     }
 
-    return output;
+    // otherwise ramp up slowly
+    currentDuty += OUTPUT_RAMP_UP_PCT_PER_LOOP;
+
+    if (currentDuty > targetDuty) {
+        currentDuty = targetDuty;
+    }
+
+    return currentDuty;
+}
+
+static float filterThrottle(uint8_t rawThrottle) {
+
+    uint16_t scaled = (uint16_t)((rawThrottle / 255.0f) * 100.0f);
+
+    rollingSum -= outputSamples[sampleIndex];
+    rollingSum += scaled;
+
+    outputSamples[sampleIndex] = scaled;
+
+    sampleIndex = (sampleIndex + 1) % DATA_POINTS;
+
+    return (float)(rollingSum / DATA_POINTS);
 }
 
 /**
@@ -139,8 +208,6 @@ void setup() {
  * */
 void loop() {
 
-    uint16_t newOutput = currentOutput;
-
     // Listen for CAN messages
     if (can.checkReceive() == CAN_MSGAVAIL) {
         CanMessage message;
@@ -148,11 +215,27 @@ void loop() {
         can.readMsgBuf(&message.dataLength, message.data); 
         message.id = can.getCanId();
 
-        // If a new throttle message is received, scale it
+        // throttle messages
         if(message.id == CAN_STEERING_THROTTLE) {
-            newOutput = scaleThrottle(message.data[0]);
+            requestedDutyPct = SMOOTH_THROTTLE ? filterThrottle(message.data[0]) : (message.data[0] / 255.0f) * 100.0f;
             lastUpdate = millis();
             ledFlash = true;
+        }
+
+        // current messages
+        if (message.id == CAN_ORIONBMS_PACK && message.dataLength >= 4) {
+            int16_t rawCurrent = (int16_t)((message.data[2] << 8) | message.data[3]);
+            packCurrentRawA = rawCurrent / 10.0f;
+
+            // bootstrap filter with valid value
+            if (!packCurrentValid) {
+                packCurrentFiltA = packCurrentRawA;
+            } else {
+                // EMA filtering
+                packCurrentFiltA += CURRENT_FILTER_ALPHA * (packCurrentRawA - packCurrentFiltA);
+            }
+            packCurrentValid = true;
+            lastCurrentRxMs = millis();
         }
 
         // Debug all received messages to serial monitor
@@ -172,34 +255,11 @@ void loop() {
 
     }
 
-    // If the new output is different than the old output, update the voltage on the DAC
-    if(newOutput != currentOutput) {
-
-        if (SMOOTH_THROTTLE) {
-            rollingSum -= outputSamples[sampleIndex];
-            rollingSum += newOutput;
-            outputSamples[sampleIndex] = newOutput;
-            sampleIndex = (sampleIndex + 1) % DATA_POINTS;
-
-            // Calculate the rolling average
-            uint16_t rollingAverage = rollingSum / DATA_POINTS;
-	    currentOutput = rollingAverage;
-        } else {
-            currentOutput = newOutput;
-        }
-
-        dac.setVoltage(currentOutput, false); 
-        DEBUG_SERIAL_LN("Voltage set to: " + String(currentOutput / DAC_VALUE_TO_V) + "v");
-    }
-
     // If the output is not 0 and it's been more than a certain amount of time since the last
     // throttle CAN message, set the output to 0 as a safety measure
-    if(currentOutput && (millis() > lastUpdate + STALE_TIME)) {
-        currentOutput = 0;
-        dac.setVoltage(currentOutput, false);
-        DEBUG_SERIAL_LN("ERROR: NO DATA - Output set to 0v");
+    if(requestedDutyPct && (millis() > lastUpdate + STALE_TIME)) {
+        requestedDutyPct = 0;
         ledFlash = false;
-        
         digitalWrite(PIN_LED, HIGH);
     }
 
@@ -224,4 +284,32 @@ void loop() {
         digitalWrite(PIN_LED, !digitalRead(PIN_LED));
     }
 
+    // compute safe throttle
+    float protectedDutyPct = computeProtectedDuty(
+        requestedDutyPct,
+        packCurrentRawA,
+        packCurrentFiltA,
+        packCurrentValid,
+        lastCurrentRxMs
+    );
+
+    // smooth throttle changes
+    appliedDutyPct = slewLimitDuty(protectedDutyPct, appliedDutyPct);
+
+    // send throttle to DAC
+    writeDutyToDac(appliedDutyPct);
+
+    if ((millis() - lastDebugMs) >= 100) {
+        lastDebugMs = millis();
+
+        DEBUG_SERIAL("Requested: ");
+        DEBUG_SERIAL(requestedDutyPct);
+        DEBUG_SERIAL("%, Applied: ");
+        DEBUG_SERIAL(appliedDutyPct);
+        DEBUG_SERIAL("%, Raw: ");
+        DEBUG_SERIAL(packCurrentRawA);
+        DEBUG_SERIAL(" A, Filt: ");
+        DEBUG_SERIAL(packCurrentFiltA);
+        DEBUG_SERIAL_LN(" A");
+    }
 }
