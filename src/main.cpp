@@ -23,7 +23,15 @@ struct CanMessage {
 
 uint32_t lastUpdate = 0;
 float rpm = 0.0f;
+float filteredRpm = 0.0f;
+float packCurrent = 0.0f;
+float filteredCurrent = 0.0f;
+bool hasCurrentReading = false;
 volatile uint32_t pulses = 0;
+
+static const uint16_t kTelemetryIntervalMs = 200;
+static const float kRpmFilterAlpha = 0.25f;
+static const float kCurrentFilterAlpha = 0.20f;
 
 /**
  * @brief Converts CAN status message to readable output
@@ -65,7 +73,7 @@ String getCanError(uint8_t errorCode){
 
 static void applyDuty(int duty) {
 
-    currentOutput = (uint16_t)((4095UL * duty) / 100UL) * 0.67; // cap at 70% cuz stm takes in 3.3 not 5v silly goose
+    currentOutput = (uint16_t)((4095UL * duty) / 100UL) * 0.67; // cap at 67% cuz stm takes in 3.3 not 5v silly goose
     dac.setVoltage(currentOutput, false);
     DEBUG_SERIAL_LN("Dutycycle set to: " + String(duty) + "%");
     float volts = (float)currentOutput / (float)DAC_VALUE_TO_V;
@@ -83,6 +91,22 @@ static bool parseDuty(const char* buf, uint8_t len, int* outDuty) {
     }
     *outDuty = duty;
     return len > 0;
+}
+
+static float lowPassFilter(float previous, float sample, float alpha) {
+    return previous + ((sample - previous) * alpha);
+}
+
+static void printTelemetry() {
+    Serial.print("RPM ");
+    Serial.print(filteredRpm, 0);
+    Serial.print(" | Current ");
+    if (hasCurrentReading) {
+        Serial.print(filteredCurrent, 1);
+        Serial.println(" A");
+    } else {
+        Serial.println("--.- A");
+    }
 }
 
 // rpm interrupt service routine
@@ -132,7 +156,7 @@ void setup() {
  * */
 void loop() {
 
-    if ((millis() - lastUpdate) >= 200) {
+    if ((millis() - lastUpdate) >= kTelemetryIntervalMs) {
         lastUpdate = millis();
 
         noInterrupts();
@@ -140,9 +164,9 @@ void loop() {
         pulses = 0;
         interrupts();
 
-        rpm = (pulses_snapshot / (0.2f * 5.0f)) * 60.0f;
-        //Serial.print("rpm: ");
-        //Serial.println(rpm, 1);
+        rpm = (pulses_snapshot / ((kTelemetryIntervalMs / 1000.0f) * 5.0f)) * 60.0f;
+        filteredRpm = lowPassFilter(filteredRpm, rpm, kRpmFilterAlpha);
+        printTelemetry();
     }
 
     // Listen for CAN messages
@@ -155,10 +179,13 @@ void loop() {
         // CURRENT SENSING!!!!!!!
         if (message.id == CAN_ORIONBMS_PACK && message.dataLength >= 4) {
             int16_t rawCurrent = (int16_t)((message.data[2] << 8) | message.data[3]);
-            float packCurrent = rawCurrent / 10.0f;
-
-            //Serial.print("current: ");
-            //Serial.println(packCurrent, 1);
+            packCurrent = rawCurrent / 10.0f;
+            if (hasCurrentReading) {
+                filteredCurrent = lowPassFilter(filteredCurrent, packCurrent, kCurrentFilterAlpha);
+            } else {
+                filteredCurrent = packCurrent;
+                hasCurrentReading = true;
+            }
         }
 
         // Debug all received messages to serial monitor
