@@ -130,25 +130,6 @@ static float computeProtectedDuty(float requestedDuty, float rawCurrent, float f
     return requestedDuty * scale;
 }
 
-static float slewLimitDuty(float targetDuty, float currentDuty) {
-    targetDuty = constrain(targetDuty, 0.0f, 100.0f);
-    currentDuty = constrain(currentDuty, 0.0f, 100.0f);
-
-    // if torque needs to decrease, do it immediately
-    if (targetDuty < currentDuty) {
-        return targetDuty;
-    }
-
-    // otherwise ramp up slowly
-    currentDuty += OUTPUT_RAMP_UP_PCT_PER_LOOP;
-
-    if (currentDuty > targetDuty) {
-        currentDuty = targetDuty;
-    }
-
-    return currentDuty;
-}
-
 static float filterThrottle(uint8_t rawThrottle) {
 
     uint16_t scaled = (uint16_t)((rawThrottle / 255.0f) * 100.0f);
@@ -293,8 +274,7 @@ void loop() {
         lastCurrentRxMs
     );
 
-    // smooth throttle changes
-    appliedDutyPct = slewLimitDuty(protectedDutyPct, appliedDutyPct);
+    appliedDutyPct = protectedDutyPct;
 
     // send throttle to DAC
     writeDutyToDac(appliedDutyPct);

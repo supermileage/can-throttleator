@@ -20,10 +20,8 @@
 // Current liming constants
 #define CURRENT_FILTER_ALPHA    0.15f
 #define SOFT_CURRENT_LIMIT_A    40.0f  // start reducing throttle above this
-#define HARD_CURRENT_LIMIT_A    60.0f  // force throttle to 0 above this
+#define HARD_CURRENT_LIMIT_A    80.0f  // force throttle to 0 above this
 #define CURRENT_TIMEOUT_MS      1000   // if BMS CAN message is stale, throttle 0
-#define OUTPUT_RAMP_UP_PCT_PER_LOOP 0.01f  // every loop, go up 1 percent towards requested throttle
-
 #define PIN_CAN_CS              10
 #define PIN_LED                 5
 #define PIN_HEARTBEAT           0
