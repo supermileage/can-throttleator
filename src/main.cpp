@@ -23,6 +23,15 @@ uint16_t outputSamples[DATA_POINTS] = {0};
 int sampleIndex = 0;
 uint32_t rollingSum = 0;
 
+uint32_t periodBuffer[RPM_FILTER_SAMPLES] = {0};
+uint8_t periodIndex = 0;
+uint32_t periodSum = 0;
+
+uint32_t lastRPM = 0;
+
+volatile uint32_t lastEdge = 0;
+float rpm = 0;
+
 float requestedDutyPct = 0.0f;
 float appliedDutyPct = 0.0f;
 
@@ -80,6 +89,20 @@ String getCanError(uint8_t errorCode){
     }
 }
 
+void hallISR() {
+    uint32_t now = micros();
+    uint32_t period = now - lastEdge;
+    lastEdge = now;
+
+    if (period == 0) return;
+
+    periodSum -= periodBuffer[periodIndex];
+    periodSum += period;
+
+    periodBuffer[periodIndex] = period;
+    periodIndex = (periodIndex + 1) % RPM_FILTER_SAMPLES;
+}
+
 /**
  * @brief Scales raw throttle input by squaring it, and then dividing by scaling factor.
  *          This has the effect of applying a simple curve, such that the throttle is not 
@@ -131,14 +154,12 @@ static float computeProtectedDuty(float requestedDuty, float rawCurrent, float f
 }
 
 static float filterThrottle(uint8_t rawThrottle) {
-
     uint16_t scaled = (uint16_t)((rawThrottle / 255.0f) * 100.0f);
 
     rollingSum -= outputSamples[sampleIndex];
     rollingSum += scaled;
 
     outputSamples[sampleIndex] = scaled;
-
     sampleIndex = (sampleIndex + 1) % DATA_POINTS;
 
     return (float)(rollingSum / DATA_POINTS);
@@ -149,6 +170,9 @@ static float filterThrottle(uint8_t rawThrottle) {
  * */
 void setup() {
 
+    pinMode(PIN_HALL, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(PIN_HALL), hallISR, RISING);
+
     // Init and turn on LED
     pinMode(PIN_LED, OUTPUT);
     digitalWrite(PIN_LED, HIGH);
@@ -157,13 +181,12 @@ void setup() {
     pinMode(PIN_HEARTBEAT, OUTPUT);
     digitalWrite(PIN_HEARTBEAT, LOW);
 
-    // Start Serial Monitor
     if(DEBUG_SERIAL_EN) {
         Serial.begin(SERIAL_MONITOR_SPEED);
     }
 
     DEBUG_SERIAL_LN();
-	DEBUG_SERIAL_LN("*************************");      
+    DEBUG_SERIAL_LN("*************************");      
 	DEBUG_SERIAL_LN("    CAN  THROTTLEATOR    ");                                                    
 	DEBUG_SERIAL_LN("*************************");
     DEBUG_SERIAL_LN();
@@ -244,6 +267,29 @@ void loop() {
         digitalWrite(PIN_LED, HIGH);
     }
 
+    if (periodSum > 0) {
+        float avgPeriod = (float)periodSum / RPM_FILTER_SAMPLES;
+        float freq = 1e6f / avgPeriod;
+        rpm = (freq * 60.0f) / POLE_PAIRS;
+    }
+
+    if ((micros() - lastEdge) > 500000UL) {
+        rpm = 0;
+    }
+
+    if (millis() > lastRPM + RPM_SEND_TIME) {
+        lastRPM = millis();
+
+        CanMessage msg;
+        msg.id = CAN_MOTOR_RPM;
+        msg.dataLength = 2;
+
+        uint16_t rpmInt = (uint16_t)rpm;
+        msg.data[0] = (rpmInt >> 8) & 0xFF;
+        msg.data[1] = rpmInt & 0xFF;
+        can.sendMsgBuf(msg.id, CAN_FRAME, msg.dataLength, msg.data);
+    }
+
     // Send a periodic heartbeat CAN message to let other devices on the CAN bus know we are connected
     if(millis() > lastHeartbeat + HEARTBEAT_TIME) {
         lastHeartbeat = millis();
@@ -286,6 +332,8 @@ void loop() {
         DEBUG_SERIAL(requestedDutyPct);
         DEBUG_SERIAL("%, Applied: ");
         DEBUG_SERIAL(appliedDutyPct);
+        DEBUG_SERIAL("%, RPM: ");
+        DEBUG_SERIAL((int)rpm);
         DEBUG_SERIAL("%, Raw: ");
         DEBUG_SERIAL(packCurrentRawA);
         DEBUG_SERIAL(" A, Filt: ");

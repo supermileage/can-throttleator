@@ -10,6 +10,10 @@
 #define STALE_TIME              1000
 // Heartbeat CAN message output interval
 #define HEARTBEAT_TIME          1000
+// RPM CAN message output interval
+#define RPM_SEND_TIME           100
+
+#define POLE_PAIRS              5
 
 // DAC
 #define DAC_VALUE_TO_V          819.2
@@ -25,6 +29,7 @@
 #define PIN_CAN_CS              10
 #define PIN_LED                 5
 #define PIN_HEARTBEAT           0
+#define PIN_HALL                2
 
 // #define I2C_ADDR_DAC            0x60  // PROTO DAC
 #define I2C_ADDR_DAC            0x62  // PCB DAC
@@ -41,6 +46,7 @@
 
 // Rolling Average
 #define DATA_POINTS             20
+#define RPM_FILTER_SAMPLES      6
 
 #define LED_FLASH_INTERVAL      125
 
