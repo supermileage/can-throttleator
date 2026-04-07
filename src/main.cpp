@@ -281,7 +281,7 @@ void loop() {
         lastRPM = millis();
 
         CanMessage msg;
-        msg.id = CAN_MOTOR_RPM;
+        msg.id = CAN_ORIONBMS_RPM;
         msg.dataLength = 2;
 
         uint16_t rpmInt = (uint16_t)rpm;
