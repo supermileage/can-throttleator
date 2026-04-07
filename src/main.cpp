@@ -295,7 +295,7 @@ void loop() {
         lastHeartbeat = millis();
 
         CanMessage msg;
-        msg.id = THROTTLE_HEARTBEAT;
+        msg.id = CAN_STEERING_READY;
         msg.dataLength = 1;
         msg.data[0] = 0x1;
         uint8_t error = can.sendMsgBuf(msg.id, CAN_FRAME, msg.dataLength, msg.data);
